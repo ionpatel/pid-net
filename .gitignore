@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+data/
+checkpoints/
+results/
+*.pt
+*.pth
+.DS_Store
