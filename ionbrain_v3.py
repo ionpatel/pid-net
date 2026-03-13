@@ -37,13 +37,14 @@ class PIDProjectionV3(nn.Module):
     """
     
     def __init__(self, d_in: int, d_out: int, bias: bool = True, 
-                 max_gate: float = 0.6, i_decay: float = 0.95,
-                 stagnation_threshold: float = 0.95):
+                 max_gate: float = 0.6, min_i_gate: float = 0.15,
+                 i_decay: float = 0.95, stagnation_threshold: float = 0.95):
         super().__init__()
         self.d_in = d_in
         self.d_out = d_out
         self.i_decay = i_decay
         self.stagnation_threshold = stagnation_threshold
+        self.min_i_gate = min_i_gate
         
         self.W_p = nn.Linear(d_in, d_out, bias=False)
         self.W_i = nn.Linear(d_in, d_out, bias=False)
@@ -127,10 +128,12 @@ class PIDProjectionV3(nn.Module):
         # Stagnation-aware derivative
         derivative, stagnation = self._compute_stagnation_aware_derivative(x)
         
-        # Gate with clamping
+        # Gate with clamping — max per gate + minimum I gate
         raw_gate = self.gate(x)
         g = F.softmax(raw_gate, dim=-1)
         g = g.clamp(max=self.max_gate)
+        # Enforce minimum I gate — integral must contribute
+        g[:,:,1] = g[:,:,1].clamp(min=self.min_i_gate)
         g = g / g.sum(dim=-1, keepdim=True)
         
         self._last_gates = g.detach()
