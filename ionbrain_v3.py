@@ -37,7 +37,7 @@ class PIDProjectionV3(nn.Module):
     """
     
     def __init__(self, d_in: int, d_out: int, bias: bool = True, 
-                 max_gate: float = 0.6, min_i_gate: float = 0.15,
+                 max_gate: float = 0.6, min_i_gate: float = 0.25,
                  i_decay: float = 0.95, stagnation_threshold: float = 0.95):
         super().__init__()
         self.d_in = d_in
