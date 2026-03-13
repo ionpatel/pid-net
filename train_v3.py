@@ -323,6 +323,10 @@ def train_model(model, train_ds, val_ds, device, epochs, batch_size, lr, name,
                 avg = epoch_loss / n
                 bpb = avg / math.log(2)
                 lr_now = sched.get_last_lr()[0]
+                elapsed = time.time() - t0
+                tokens_so_far = n * batch_size * (train_ds.seq_len if hasattr(train_ds, 'seq_len') else 512)
+                tok_per_sec = tokens_so_far / max(elapsed, 1e-6)
+                
                 extra = ""
                 if hasattr(model, 'get_gate_stats'):
                     gates = model.get_gate_stats()
@@ -342,7 +346,7 @@ def train_model(model, train_ds, val_ds, device, epochs, batch_size, lr, name,
                         stag = f" | Stag: {sum(stag_vals)/len(stag_vals):.2f}"
                 
                 print(f"  [{name:>14}] Ep {epoch+1} Step {batch_idx+1}/{len(train_dl)} | "
-                      f"Loss {avg:.4f} BPB {bpb:.3f} LR {lr_now:.1e}{extra}{rep}{ss}{stag}")
+                      f"Loss {avg:.4f} BPB {bpb:.3f} LR {lr_now:.1e} | {tok_per_sec:.0f} tok/s{extra}{rep}{ss}{stag}")
         
         dt = time.time() - t0
         train_loss = epoch_loss / max(n, 1)
