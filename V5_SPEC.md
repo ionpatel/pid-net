@@ -4,6 +4,8 @@
 **Authors:** Ion Patel & Harshil Patel  
 **Date:** March 14, 2026  
 **Status:** Specification / Pre-implementation  
+**Framework:** MLX (Apple Silicon native)  
+**Hardware Path:** MacBook → Mac Studio → Mac Studio Cluster  
 **Inspired by:** PID Control Theory × Wolfram Physics × Predictive Coding × Fast Weight Programmers
 
 ---
@@ -818,7 +820,7 @@ Collapse Check: 🟢 OK (0/5 prompts show repetition)
 
 | Risk | Severity | Probability | Mitigation |
 |------|----------|-------------|------------|
-| Graph ops too slow on GPU | High | 40% | Use sparse ops, PyG/DGL, bounded graph size |
+| Graph ops too slow | Medium | 25% | MLX unified memory eliminates transfer overhead; custom Metal kernels if needed |
 | Backprop through topology changes unstable | High | 30% | Soft/differentiable edges, gradient clipping |
 | Over-smoothing (all nodes converge) | Medium | 50% | Residual connections, normalization, limited message passing |
 | Fast weight memory explodes | Medium | 30% | Norm clipping, decay, capacity limiting |
@@ -876,14 +878,29 @@ Graph:       "cat" ──edge── "happy" (direct connection learned via PID)
              (1 hop)
 ```
 
-### 12.3 Challenge: GPU Efficiency
+### 12.3 Challenge: Compute Efficiency
 
-**Problem:** Graph operations are irregular — hard to parallelize on GPU.
+**Problem:** Graph operations are irregular — hard to parallelize on traditional CUDA GPUs.
 
-**Solution:** Three strategies:
-1. **Batched sparse matrix multiplication** (PyTorch sparse, triton kernels)
-2. **Fixed maximum graph size** (pad smaller graphs, mask operations)
-3. **Block-sparse adjacency** (chunk the graph, dense within blocks, sparse between)
+**Solution:** MLX on Apple Silicon — architectural alignment.
+
+Why this works better than CUDA for our specific architecture:
+1. **Unified memory** — No CPU↔GPU transfers for irregular graph access patterns. Sparse gather/scatter operations that kill CUDA performance are near-free on Apple Silicon.
+2. **Dynamic shapes** — MLX handles changing graph topology natively. No recompilation, no shape guards, no padding waste.
+3. **Lazy evaluation** — Automatic fusion of many small per-node/per-edge operations into efficient Metal kernels.
+4. **Memory bandwidth** — Apple Silicon's bandwidth per dollar exceeds NVIDIA for memory-bound workloads (which sparse graph ops ARE).
+
+Additional strategies:
+1. **Fixed maximum graph size** with masking (for batch efficiency)
+2. **Block-sparse adjacency** (dense within local neighborhoods, sparse globally)
+3. **Custom Metal kernels** for critical path operations (if needed at scale)
+
+**Scaling Path:**
+- **Phases 1-4:** MacBook (M-series) — single device, ≤5M params
+- **Phase 5:** Mac Studio (M Ultra) — 192GB+ unified memory, 125-350M params
+- **Phase 5+:** Mac Studio cluster — MLX distributed training, 1B+ params
+- **Phase 6+:** Multi-node Apple Silicon — custom cluster, 10B+ params
+- **Advantage:** PID-Net v5's sparse graph architecture is fundamentally better suited to unified memory than to CUDA's separated memory model. We're not competing with NVIDIA on dense matmuls — we're playing a different game on hardware optimized for that game.
 
 ### 12.4 Challenge: Multi-Scale Synchronization
 
