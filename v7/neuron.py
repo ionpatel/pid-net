@@ -48,7 +48,7 @@ PROTEIN_REMOVAL_THRESHOLD = 0.02
 PROTEIN_REINFORCE_RATE = 0.1    # how much new transcription reinforces existing protein
 
 # Neuron dynamics
-MEMBRANE_LEAK = 0.9             # membrane potential leaks each step
+MEMBRANE_LEAK = 0.95            # membrane potential leaks each step (longer integration window)
 MEMBRANE_RESET = 0.0            # potential after firing
 SUBTHRESHOLD_SCALE = 0.1        # how much subthreshold input drives computation
 FIRING_HISTORY_LEN = 50         # steps of firing history to track
@@ -274,8 +274,11 @@ class Neuron:
         receptor_input = self._receive(incoming_signals)
         
         # ---- 2. MEMBRANE DYNAMICS ----
+        # Membrane potential driven by INPUT MAGNITUDE (like ion flow)
+        # Not the signed sum (which cancels with random encodings)
         self.membrane_potential *= MEMBRANE_LEAK  # leak
-        self.membrane_potential += np.sum(receptor_input)
+        input_magnitude = float(np.linalg.norm(receptor_input))
+        self.membrane_potential += input_magnitude
         
         # ---- 3. FIRE DECISION ----
         should_fire, fire_strength = self._check_fire()
@@ -334,8 +337,18 @@ class Neuron:
     
     def _receive(self, signals: List[NeuralSignal]) -> np.ndarray:
         """
-        Step 1: Receive signals via receptor proteins.
-        Each receptor detects specific signal types with specific sensitivity.
+        Step 1: Receive signals via two pathways:
+        
+        1. DIRECT pathway (voltage-gated): raw signal → membrane
+           - Like gap junctions / electrical synapses
+           - Always present, provides baseline input
+        
+        2. RECEPTOR pathway (ligand-gated): signal → receptor → filtered input
+           - Like chemical synapses
+           - Selective, modulatory
+        
+        Both pathways contribute. This prevents signal death from
+        inhibitory receptor initialization.
         """
         total_input = np.zeros(self.d_model, dtype=np.float32)
         
@@ -344,14 +357,6 @@ class Neuron:
         
         receptors = self._get_proteins_of_type(ReceptorProtein)
         
-        if not receptors:
-            # No receptors — direct summation (like a bare membrane)
-            for sig in signals:
-                enc = sig.encoding[:self.d_model] if len(sig.encoding) >= self.d_model else np.pad(sig.encoding, (0, self.d_model - len(sig.encoding)))
-                total_input += enc * sig.strength
-            self.metrics.n_signals_received += len(signals)
-            return total_input
-        
         for sig in signals:
             enc = sig.encoding
             if len(enc) < self.d_model:
@@ -359,9 +364,18 @@ class Neuron:
             elif len(enc) > self.d_model:
                 enc = enc[:self.d_model]
             
-            for receptor in receptors:
-                response = receptor.detect(enc)
-                total_input += enc * response
+            # Direct pathway: raw signal scaled by strength (always present)
+            # This is the electrical/gap-junction component
+            # Provides reliable baseline — prevents signal death from inhibitory receptors
+            direct = enc * sig.strength * 0.5
+            total_input += direct
+            
+            # Receptor pathway: filtered through receptor proteins
+            # Adds selectivity and modulation on top of direct pathway
+            if receptors:
+                for receptor in receptors:
+                    response = receptor.detect(enc)
+                    total_input += enc * response * 0.5 / len(receptors)
             
             self.metrics.n_signals_received += 1
         
@@ -752,7 +766,7 @@ def verify_neuron(genome_path: str = None):
     check("No signal → membrane leaks toward 0",
           abs(neuron.membrane_potential) <= abs(membrane_before) + 0.01)
     
-    # Send a signal
+    # Send a signal — should either change membrane or trigger fire
     signal = NeuralSignal(
         source_id=99,
         encoding=np.random.randn(d_model).astype(np.float32) * 0.5,
@@ -760,11 +774,14 @@ def verify_neuron(genome_path: str = None):
         strength=1.0,
     )
     
+    fires_before = neuron.metrics.n_fires
     membrane_before = neuron.membrane_potential
     neuron.step([signal])
-    check("Signal changes membrane potential",
-          neuron.membrane_potential != membrane_before,
-          f"Before: {membrane_before:.4f}, After: {neuron.membrane_potential:.4f}")
+    membrane_changed = neuron.membrane_potential != membrane_before
+    fired = neuron.metrics.n_fires > fires_before
+    check("Signal affects neuron (changes membrane or fires)",
+          membrane_changed or fired,
+          f"Before: {membrane_before:.4f}, After: {neuron.membrane_potential:.4f}, fired: {fired}")
     
     # Multiple signals accumulate (or trigger a fire, which is also accumulation working)
     signals = [
