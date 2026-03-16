@@ -35,13 +35,13 @@ from neuron import Neuron, NeuronType, NeuralSignal, NeuronMetrics
 SYNAPSE_INIT_WEIGHT = 0.1        # initial synaptic weight
 SYNAPSE_MAX_WEIGHT = 3.0         # maximum absolute weight
 SYNAPSE_MIN_WEIGHT = -3.0        # minimum absolute weight (inhibitory)
-SYNAPSE_DECAY = 0.9999           # slow weight decay toward 0
+SYNAPSE_DECAY = 0.9995           # weight decay toward 0 (prevents saturation)
 
 # Hebbian learning
-HEBBIAN_LR = 0.01                # Hebbian learning rate
-ANTI_HEBBIAN = 0.3               # anti-Hebbian coefficient (pre fires, post doesn't)
-TRACE_DECAY = 0.95               # eligibility trace decay rate
-REWARD_LR = 0.05                 # reward-modulated learning rate
+HEBBIAN_LR = 0.002               # Hebbian learning rate (was 0.01 — caused saturation)
+ANTI_HEBBIAN = 0.5               # anti-Hebbian coefficient (stronger — prevents all-excite)
+TRACE_DECAY = 0.9                # eligibility trace decay rate (faster decay)
+REWARD_LR = 0.01                 # reward-modulated learning rate (was 0.05)
 
 # Circuit dynamics
 DEFAULT_PROPAGATION_ROUNDS = 5   # signal propagation rounds per input
@@ -403,13 +403,92 @@ class Circuit:
         return outputs
     
     def _hebbian_update(self, fired: Dict[int, bool], reward: float):
-        """Apply Hebbian learning to all synapses."""
+        """
+        Apply BCM-like learning + weight normalization.
+        
+        BCM (Bienenstock-Cooper-Munro): the modification threshold slides
+        based on the neuron's recent activity. High-activity neurons need
+        STRONGER correlation to potentiate — naturally prevents saturation.
+        Then normalize incoming weights per neuron to maintain diversity.
+        """
+        # BCM-like Hebbian update
         for (pre_id, post_id), syn in self.synapses.items():
-            syn.update_hebbian(
-                pre_fired=fired.get(pre_id, False),
-                post_fired=fired.get(post_id, False),
-                reward=reward,
-            )
+            pre_fired = fired.get(pre_id, False)
+            post_fired = fired.get(post_id, False)
+            
+            if not pre_fired and not post_fired:
+                # Neither fired — just decay
+                syn.weight *= SYNAPSE_DECAY
+                continue
+            
+            # Post-neuron's sliding threshold (BCM)
+            post_neuron = self.neurons.get(post_id)
+            if post_neuron:
+                theta = post_neuron.firing_rate  # sliding threshold
+            else:
+                theta = 0.5
+            
+            post_rate = post_neuron.firing_rate if post_neuron else 0.5
+            
+            if pre_fired and post_fired:
+                # Both fire: potentiate only if post is BELOW threshold
+                # (high-activity neurons resist potentiation)
+                delta = HEBBIAN_LR * (post_rate - theta) * (1.0 - theta)
+                # This is negative when post_rate > theta (depression!)
+            elif pre_fired and not post_fired:
+                # Pre fires, post doesn't — mild depression
+                delta = -ANTI_HEBBIAN * HEBBIAN_LR
+            else:
+                # Post fires without pre — no change
+                delta = 0.0
+            
+            # Reward modulation
+            if reward != 0 and syn.eligibility_trace > 0.01:
+                delta += REWARD_LR * reward * syn.eligibility_trace
+            
+            syn.weight += delta
+            syn.weight *= SYNAPSE_DECAY
+            syn.weight = np.clip(syn.weight, SYNAPSE_MIN_WEIGHT, SYNAPSE_MAX_WEIGHT)
+            
+            # Update eligibility trace
+            if pre_fired and post_fired:
+                syn.eligibility_trace = 1.0
+            else:
+                syn.eligibility_trace *= TRACE_DECAY
+        
+        # Weight normalization per neuron
+        # Constrain total incoming weight magnitude — preserves relative
+        # differences while preventing saturation
+        TARGET_IN_WEIGHT = 1.5  # target L2 norm of incoming weights
+        NORM_RATE = 0.01        # how fast we normalize
+        
+        for nid in self.neurons:
+            incoming = self._incoming[nid]
+            if not incoming:
+                continue
+            
+            weights = []
+            syns = []
+            for pre_id in incoming:
+                syn = self.synapses.get((pre_id, nid))
+                if syn:
+                    weights.append(syn.weight)
+                    syns.append(syn)
+            
+            if not weights:
+                continue
+            
+            # L2 norm of incoming weights
+            w_arr = np.array(weights)
+            norm = np.sqrt(np.sum(w_arr ** 2))
+            
+            if norm > 0.01:
+                # Soft normalization: nudge toward target norm
+                scale = 1.0 - NORM_RATE * (norm - TARGET_IN_WEIGHT) / norm
+                scale = np.clip(scale, 0.95, 1.05)  # gentle
+                for syn in syns:
+                    syn.weight *= scale
+                    syn.weight = np.clip(syn.weight, SYNAPSE_MIN_WEIGHT, SYNAPSE_MAX_WEIGHT)
     
     # ================================================================
     # READOUT

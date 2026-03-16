@@ -35,7 +35,7 @@ import os
 from genome import Genome, create_minimal_genome, create_standard_genome
 from neuron import Neuron, NeuronType, NeuralSignal
 from circuit import Circuit
-from neuromodulation import Brain, create_modulated_brain, ModulatorType
+from neuromodulation import Brain, create_modulated_brain, create_language_brain, ModulatorType
 
 
 # ============================================================
@@ -79,7 +79,7 @@ class LanguageBrain(nn.Module):
         
         # Biological brain (NOT a PyTorch module — uses numpy)
         self.genome = Genome(genome_path, mode='rw')
-        self.brain = create_modulated_brain(self.genome, d_model=d_model)
+        self.brain = create_language_brain(self.genome, d_model=d_model, n_hidden=16)
         
         # Training state
         self._step = 0

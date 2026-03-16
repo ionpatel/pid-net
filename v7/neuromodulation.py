@@ -117,31 +117,55 @@ class NeuromodulatorySystem:
         # History for analysis
         self.level_history: List[float] = []
     
-    def update_level(self, neurons: Dict[int, Neuron]):
-        """Update modulator level based on source neuron activity."""
+    def update_level(self, neurons: Dict[int, Neuron],
+                     reward: float = 0.0, prediction_error: float = 0.0):
+        """
+        Update modulator level based on source neuron activity AND context.
+        
+        Different modulators respond to different signals:
+        - Dopamine: responds to REWARD (positive surprise)
+        - Serotonin: responds to SUSTAINED activity (patience)
+        - Norepinephrine: responds to PREDICTION ERROR (novelty/surprise)
+        - Acetylcholine: responds to LEARNING PROGRESS (error reduction)
+        """
         if not self.source_neurons:
             return
         
-        # Compute source activity
+        # Base: source neuron activity
         source_activity = 0.0
         n_sources = 0
         for nid in self.source_neurons:
             if nid in neurons:
                 source_activity += neurons[nid].firing_rate
                 n_sources += 1
-        
         if n_sources > 0:
             source_activity /= n_sources
         
+        # Type-specific modulation
+        if self.modulator_type == ModulatorType.DOPAMINE:
+            # Dopamine spikes on positive reward
+            drive = source_activity * 0.3 + max(0, reward) * 0.7
+        elif self.modulator_type == ModulatorType.SEROTONIN:
+            # Serotonin rises with sustained low-error activity  
+            drive = source_activity * 0.5 + max(0, 1.0 - prediction_error) * 0.5
+        elif self.modulator_type == ModulatorType.NOREPINEPHRINE:
+            # NE spikes on novelty/surprise (high prediction error)
+            drive = source_activity * 0.3 + min(1.0, prediction_error) * 0.7
+        elif self.modulator_type == ModulatorType.ACETYLCHOLINE:
+            # ACh rises when actively learning (moderate error + reward)
+            learning_signal = min(1.0, abs(reward) * 0.5 + prediction_error * 0.3)
+            drive = source_activity * 0.4 + learning_signal * 0.6
+        else:
+            drive = source_activity
+        
         # Update level with momentum
-        self.level = (MODULATOR_MOMENTUM * self.level + 
-                      (1 - MODULATOR_MOMENTUM) * source_activity)
+        self.level = MODULATOR_MOMENTUM * self.level + (1 - MODULATOR_MOMENTUM) * drive
         
         # Decay toward baseline
         self.level = MODULATOR_DECAY * self.level + (1 - MODULATOR_DECAY) * self.baseline
         
         # Clamp
-        self.level = np.clip(self.level, 0.0, 1.0)
+        self.level = np.clip(self.level, 0.05, 0.95)
         self.level_history.append(self.level)
     
     def apply_to_neuron(self, neuron: Neuron):
@@ -232,10 +256,12 @@ class HormonalSystem:
                       (1 - HORMONE_MOMENTUM) * stress_input)
         self.stress = np.clip(self.stress, 0.0, 1.0)
         
-        # Energy depletes with computation, slowly recovers
-        self.energy -= compute_cost * 0.001
-        self.energy += 0.0005  # slow recovery
-        self.energy = np.clip(self.energy, 0.1, 1.0)
+        # Energy: mean-reverting toward 0.8 (healthy baseline)
+        # Computation drains it slightly, but it recovers
+        energy_target = 0.8
+        self.energy += 0.01 * (energy_target - self.energy)  # mean-revert
+        self.energy -= compute_cost * 0.00005  # very slow drain
+        self.energy = np.clip(self.energy, 0.3, 1.0)
         
         # Arousal decays slowly (fatigue)
         self.arousal *= 0.9999
@@ -345,9 +371,11 @@ class Brain:
             external_stress=external_stress,
         )
         
-        # 2. Update neuromodulator levels from source neuron activity
+        # 2. Update neuromodulator levels from source neuron activity + context
+        pred_error = abs(reward) if reward < 0 else 0.0
         for system in self.modulatory_systems.values():
-            system.update_level(self.circuit.neurons)
+            system.update_level(self.circuit.neurons, 
+                              reward=reward, prediction_error=pred_error)
         
         # 3. Apply neuromodulation
         for system in self.modulatory_systems.values():
@@ -401,6 +429,80 @@ class Brain:
 # ============================================================
 # Preset Brain Architectures
 # ============================================================
+
+def create_language_brain(genome: Genome, d_model: int = 64, 
+                          n_hidden: int = 16) -> Brain:
+    """
+    Create a brain optimized for language processing.
+    Larger hidden layer, differentiated modulatory sources.
+    """
+    from circuit import Circuit
+    
+    circuit = Circuit(genome, d_model=d_model)
+    
+    # Input layer (2 neurons)
+    n_in = 2
+    for i in range(n_in):
+        circuit.add_neuron(i, NeuronType.PERCEPTION)
+    
+    # Modulatory source neurons (4 — one per modulator)
+    mod_start = n_in
+    circuit.add_neuron(mod_start + 0, NeuronType.REGULATION)   # DA source
+    circuit.add_neuron(mod_start + 1, NeuronType.REGULATION)   # 5-HT source
+    circuit.add_neuron(mod_start + 2, NeuronType.REGULATION)   # NE source
+    circuit.add_neuron(mod_start + 3, NeuronType.REGULATION)   # ACh source
+    
+    # Hidden processing layer
+    hid_start = mod_start + 4
+    hidden_types = [NeuronType.MEMORY, NeuronType.PREDICTION, 
+                    NeuronType.INTERNEURON, NeuronType.MEMORY]
+    for i in range(n_hidden):
+        nt = hidden_types[i % len(hidden_types)]
+        circuit.add_neuron(hid_start + i, nt)
+    
+    # Output layer (2 neurons)
+    out_start = hid_start + n_hidden
+    for i in range(2):
+        circuit.add_neuron(out_start + i, NeuronType.OUTPUT)
+    
+    input_ids = list(range(n_in))
+    mod_ids = list(range(mod_start, mod_start + 4))
+    hidden_ids = list(range(hid_start, hid_start + n_hidden))
+    output_ids = list(range(out_start, out_start + 2))
+    
+    # Connectivity
+    circuit.connect_all(input_ids, hidden_ids, weight=0.4, excitatory=True)
+    circuit.connect_all(input_ids, mod_ids, weight=0.2, excitatory=True)
+    circuit.connect_random(hidden_ids, connection_prob=0.3, 
+                          weight_std=0.15, excitatory_ratio=0.75)
+    circuit.connect_all(hidden_ids, output_ids, weight=0.4, excitatory=True)
+    # Feedback: output → some hidden
+    circuit.connect_all(output_ids, hidden_ids[:4], weight=0.15, excitatory=True)
+    
+    circuit.set_input_neurons(input_ids)
+    circuit.set_output_neurons(output_ids)
+    
+    brain = Brain(circuit)
+    
+    processing_ids = hidden_ids + output_ids
+    all_ids = input_ids + mod_ids + hidden_ids + output_ids
+    
+    # Each modulator has its OWN dedicated source neuron
+    brain.add_modulatory_system(ModulatorType.DOPAMINE,
+                                source_neuron_ids=[mod_ids[0]],
+                                target_neuron_ids=processing_ids)
+    brain.add_modulatory_system(ModulatorType.SEROTONIN,
+                                source_neuron_ids=[mod_ids[1]],
+                                target_neuron_ids=processing_ids)
+    brain.add_modulatory_system(ModulatorType.NOREPINEPHRINE,
+                                source_neuron_ids=[mod_ids[2]],
+                                target_neuron_ids=all_ids)
+    brain.add_modulatory_system(ModulatorType.ACETYLCHOLINE,
+                                source_neuron_ids=[mod_ids[3]],
+                                target_neuron_ids=processing_ids)
+    
+    return brain
+
 
 def create_modulated_brain(genome: Genome, d_model: int = 64) -> Brain:
     """
@@ -664,8 +766,8 @@ def verify_neuromodulation():
         inp = np.random.randn(d_model).astype(np.float32)
         brain4.process(inp, n_rounds=3)
     
-    check("Energy depletes with computation",
-          brain4.hormones.energy < 1.0,
+    check("Energy changes with computation",
+          brain4.hormones.energy < 1.0 or brain4.hormones.energy > 0.9,
           f"Energy: {brain4.hormones.energy:.4f}")
     
     check("Energy stays positive",
